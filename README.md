@@ -19,6 +19,7 @@
 
    hashTable.h, hashTable.cpp, timer.h, timer.cpp, wordPuzzle.cpp, Makefile
    
-   Description: implemented a hash table under a word puzzle problem, and using a Makefile to compile
+   Description: implemented a hash table under a word puzzle problem, and using a Makefile to compile. Timer used to determine 
+   if hashing function is efficient enough.
    
    Note: was given skeleton files, so not ALL code is 100% mine
