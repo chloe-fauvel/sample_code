@@ -1,0 +1,439 @@
+---
+title: "Handling missing values in univariate time series data"
+author: "Chloe Fauvel"
+date: "5/7/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: yeti
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+### Load Packages
+```{r packages}
+library(tidyverse)
+library(knitr)
+library(kableExtra) #kable_styling()
+library(DT)         #datatable(), formatRound()
+library(readxl)    #read_excel()
+library(lubridate) #year()
+library(forecast)  #ggAcf()
+library(imputeTS)  #ts(), statsNA(), all imputation functions, ggplot_na_imputations()
+library(plotly)    #ggplotly()
+```
+
+
+# Introduction
+Time series is a sequence of data that has been observed at successive points in time, usually assumed to be in equally spaced time intervals. There are many domains where time series analysis is applicable and important.
+
+Example applications:
+
+* Climate: emissions, temperature, electricity consumption
+* Economics: stock prices, company earnings, unemployment rate
+* Social sciences: birthrates, literacy rates
+* Epidemiology: number of influenza cases over time
+
+
+### Elements of Time Series Data
+#### 1. Trend
+A long term  upward or downward movement of the data
+
+Example:
+
+```{r, echo=FALSE}
+data("JohnsonJohnson")
+plot(JohnsonJohnson, ylab="Earnings per share", xlab="Year", main="Quarterly earnings per Johnson & Johnson share")
+```
+
+
+#### 2. Seasonality
+A recurring and periodic pattern that completes itself within a specific time period. The amount of time it takes to get from one peak to another is known as the **period**.
+
+Example:
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(TSA)
+data(beersales)
+
+plot(beersales, ylab="Beer sales (millions of barrels)", xlab="Year", main="Monthly beer sales in millions of barrels")
+```
+
+
+#### 3. Autocorrelation
+When a variable is highly dependent on its past values, meaning correlation of a variable with itself.
+
+This is what makes time series data so unique. You cannot perform simple linear regression on time series data due to autocorrelation, which fails the requirement for independent and identically distributed observations when performing linear regression. With time series data, the past informs the future. You can represent autocorrelation graphically using the `ggAcf()` function from the `forecast` package.
+
+```{r}
+ggAcf(beersales) #input must be a time series object
+```
+
+Any observation outside of the dotted blue line means it has a high autocorrelation; therefore, it is statistically significant and should be included in the autoregressive component of our model.
+
+As you will see in the final form of a time series regression model, autocorrelation is not modeled directly to the observations, but to the residuals of the trend and seasonality model.
+
+
+#### 4. Error
+The error, or residual, is the natural variability in the data once trend, seasonality, and autocorrelation is accounted for in the regression model.
+
+
+#### Final Form
+A regression model for time series data takes the following form:
+
+$$Y_t = \beta_0 + \beta_1t + \sum_{i=1}^{L-1}\beta_{i+1}X_i + \epsilon_t$$
+where
+$$\epsilon_t = \sum_{j=1}^k\phi_j\epsilon_{t-j}+w_t$$
+
+where the $\beta_1$ term models **trend**, the summation term models the $L$ number of seasons for **seasonality**, the $\epsilon$ term models the **autocorrelation**, and $w_t$ is the remaining **error** (residuals) in the data.
+
+How to actually model and analyze a time series regression model is beyond the scope of this tutorial. We will only address how to fill in missing data values for time series data. To get started with this tutorial, all you need is a time series data set observed at equally spaced time steps.
+
+
+## Motivation
+I came across time series data while working on my fourth year capstone project this year. My team worked to develop a forecasting model that would predict energy consumption for the University of Virginia's Fontaine Research Park. As with most time series data, there were holes in the data. Generally, these missing data values can come from faulty sensor readings, unexpected communication errors, power outages, markets are closed for the day, etc. Missing values in time series is particularly troublesome when it comes to time series modeling and analysis.
+
+This tutorial will provide different methods to address missing data values in time series data. Evident from the list of applications for time series analysis, anyone working with this type of data can benefit from this tutorial.
+
+
+# Data
+My capstone team was given proxy building data on past electricity, heating, and cooling usage, along with temperature in Fahrenheit and relative humidity. We also extracted dates from the academic calendar to determine whether classes were in session or if there was a break. Due to irregular building usage during the COVID-19 pandemic, we removed data after March 2020. For the sake of simplicity, this tutorial will only be looking at the electricity usage data in kilowatts for Minor Hall at UVA. The final data set was 15-min interval data from February 1, 2019 to February 1, 2020, which compromises of 35,040 observations and 9 variables.
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE}
+datadir <- "C:/Users/Chloe/OneDrive - University of Virginia/Dacarbonization Capstone Project FY 21"
+setwd(datadir)
+
+# electricity
+data <- read_excel("Proxy Buildings 0065 Data.xlsx", sheet=1, col_names=TRUE)
+data <- data[,c("Timestamp","AVG_Value")]
+
+# other variables: hour, minute, weekday
+data$hour <- factor(hour(data$Timestamp))
+data$min <- minute(data$Timestamp)
+data$day <- weekdays(data$Timestamp)
+data$day[which(data$day %in% c("Monday","Tuesday","Wednesday","Thursday","Friday"))] <- "weekday"
+data$day[which(data$day %in% c("Saturday","Sunday"))] <- "weekend"
+
+#2/1/2019 - 2/1/2020
+start_index <- which((year(data$Timestamp)==2019) & (month(data$Timestamp)==2) & (day(data$Timestamp)==1) &
+                       (data$hour == 0) & (data$min == 0))
+end_index <- which((year(data$Timestamp)==2020) & (month(data$Timestamp)==2) & (day(data$Timestamp)==1) &
+                       (data$hour == 0) & (data$min == 0))
+
+end_index_test <- which((year(data$Timestamp)==2020) & (month(data$Timestamp)==3) & (day(data$Timestamp)==1) & (data$hour == 0) & (data$min == 0))
+
+data <- data[start_index:(end_index-1),]
+
+# temperature + relative humidity
+temp <- read_excel("Proxy Buildings 0065 Data.xlsx", sheet=5, col_names=TRUE)
+temp <- temp[,c(2,7)]
+rh <- read_excel("Proxy Buildings 0065 Data.xlsx", sheet=6, col_names=TRUE)
+rh <- rh[,c(2,7)]
+
+data <-  merge(data, temp, by="Timestamp")
+names(data)[2] <- "electricity"
+names(data)[6] <- "tempF"
+
+data <-  merge(data, rh, by="Timestamp")
+names(data)[2] <- "electricity"
+names(data)[7] <- "rh"
+
+# other variables: school term, season
+data$term <- rep("",nrow(data))
+data$term[which(data$Timestamp %within% interval('2019-01-14 00:00:00','2019-03-08 23:45:00'))] <- "reg_courses_in_session"
+data$term[which(data$Timestamp %within% interval('2019-03-09 00:00:00','2019-03-17 23:45:00'))] <- "spring_break"
+data$term[which(data$Timestamp %within% interval('2019-03-18 00:00:00','2019-05-10 23:45:00'))] <- "reg_courses_in_session"
+data$term[which(data$Timestamp %within% interval('2019-05-11 00:00:00','2019-05-12 23:45:00'))] <- "summer_break"
+data$term[which(data$Timestamp %within% interval('2019-05-13 00:00:00','2019-08-02 23:45:00'))] <- "summer_session"
+data$term[which(data$Timestamp %within% interval('2019-08-03 00:00:00','2019-08-26 23:45:00'))] <- "summer_break"
+data$term[which(data$Timestamp %within% interval('2019-08-27 00:00:00','2019-11-26 23:45:00'))] <- "reg_courses_in_session"
+data$term[which(data$Timestamp %within% interval('2019-11-27 00:00:00','2019-12-01 23:45:00'))] <- "thanksgiving_break"
+data$term[which(data$Timestamp %within% interval('2019-12-02 00:00:00','2019-12-17 23:45:00'))] <- "reg_courses_in_session"
+data$term[which(data$Timestamp %within% interval('2019-12-18 00:00:00','2020-01-01 23:45:00'))] <- "winter_break"
+data$term[which(data$Timestamp %within% interval('2020-01-02 00:00:00','2020-01-12 23:45:00'))] <- "Jterm"
+data$term[which(data$Timestamp %within% interval('2020-01-13 00:00:00','2020-03-06 23:45:00'))] <- "reg_courses_in_session"
+data$term <- factor(data$term)
+
+data$season <- rep("",nrow(data))
+data$season[which(data$Timestamp %within% interval('2018-12-01 00:00:00','2019-02-28 23:45:00'))] <- "winter"
+data$season[which(data$Timestamp %within% interval('2019-03-01 00:00:00','2019-05-31 23:45:00'))] <- "spring"
+data$season[which(data$Timestamp %within% interval('2019-06-01 00:00:00','2019-08-31 23:45:00'))] <- "summer"
+data$season[which(data$Timestamp %within% interval('2019-09-01 00:00:00','2019-11-30 23:45:00'))] <- "fall"
+data$season[which(data$Timestamp %within% interval('2019-12-01 00:00:00','2020-02-29 23:45:00'))] <- "winter"
+data$season <- factor(data$season)
+
+DT::datatable(data, options = list(paging=TRUE)) %>% formatRound(c('electricity','tempF','rh'),4)
+```
+
+
+### Data Exploration
+Once you have a compiled data set, you want to explore your data and understand what you are working with. The first step is to make a simple plot of your time series data.
+
+```{r}
+p <- ggplot(data) + geom_line(aes(x=Timestamp, y=electricity)) + ylab('electricity in kW')
+ggplotly(p)
+```
+
+Our univariate time series does not appear to have much of a trend, but does indicate strong seasonality. Understanding the trend, seasonality, and autocorrelation of your univariate time series will help you narrow down which imputation algorithm is the best to use. 
+
+We can see gaps in our graph around the first week of July and November. We can also see that electricity usage was recorded as 0 a few times. Knowing that an academic building at a university is never really shut down and is always running at a minimum of electricity, we assumed this was an error and replaced all 0's with NA.
+```{r}
+data$electricity[data$electricity == 0] <- NA  #replace 0 with NA
+```
+
+Since we are working with time series, let's go ahead and convert our three time series in the data set to time series objects using `ts()` from the `imputeTS` package.
+```{r}
+elec.ts <- ts(data$electricity)
+temp.ts <- ts(data$tempF)
+rh.ts <- ts(data$rh)
+```
+
+Next, you want to see exactly how many missing data values there are, if any. If you are lucky, there won't be any! But if that were the case, then you probably wouldn't be reading this tutorial, so let's continue exploring... 
+```{r}
+## electricity data
+length(which(is.na(elec.ts)))  #552 rows with NA (out of 35,040 rows)
+
+statsNA(elec.ts) #we can see that there are two large chunks of missing electricity data
+
+## temperature data
+length(which(is.na(temp.ts)))  #1059 rows with NA (out of 35,040 rows)
+
+## relative humidity data
+length(which(is.na(rh.ts)))  #773 rows with NA (out of 35,040 rows)
+
+## out of the 552 rows of missing electricity data, 543 also have missing temperature data
+length(which(is.na(elec.ts) & is.na(temp.ts)))
+
+## out of the 552 rows of missing electricity data, 268 also have missing temperature and relative humidity data
+length(which(is.na(elec.ts) & is.na(temp.ts) & is.na(rh.ts)))
+
+## extract list of indices that have missing electricity data
+missing <- which(is.na(elec.ts))
+
+# paged table of missing electricity observations
+DT::datatable(data[missing,], options = list(paging=TRUE)) %>% formatRound(c('electricity','tempF','rh'),4)
+```
+
+Out of the 35,040 observations:
+
+* 552 had missing electricity data
+* 1059 had missing temperature data
+* 773 had missing relative humidity data
+* 268 had missing electricity, temperature, and relative humidity data
+    * there was a period of over 48 hours of missing electricity, temperature, and relative humidity data (from 7/17/2019 7:45:00 - 7/19/2019 22:45:00 corresponding to indices 15968-16220)
+
+# Univarite Time Series Algorithms
+A univariate time series is a series of observations for a single variable at successive points in time. The singular columns for the electricity, temperature, or relative humidity are examples of univariate time series data.
+
+```{r, echo=FALSE}
+t1 <- data[1:6,c("Timestamp", "electricity")]
+t2 <- data[1:6,c("Timestamp", "tempF")]
+t3 <- data[1:6,c("Timestamp", "rh")]
+
+t1 %>% kable() %>% kable_styling(full_width = FALSE, position = 'float_left')
+t3 %>% kable() %>% kable_styling(full_width = FALSE, position = 'float_right')
+t2 %>% kable() %>% kable_styling(full_width = FALSE)
+```
+
+This tutorial will demonstrate the algorithms used to impute missing univariate time series data on the electricity data. The remaining variables in our data set were used later on for time series regression. The `imputeTS` R package is the only package that is solely dedicated to univariate time series imputation, so this tutorial will focus on the algorithms within this package.
+
+
+### Mean/ Median/ Mode Value Imputation
+You simply take the mean, median, or mode of the existing time series data and fill in the missing values with that value. We will demonstrate using the `na_mean()` function from the `imputeTS` package.
+```{r}
+mean.elec.ts <- na_mean(elec.ts, option = "mean")
+median.elec.ts <- na_mean(elec.ts, option = "median")
+mode.elec.ts <- na_mean(elec.ts, option = "mode")
+```
+
+```{r, echo=FALSE}
+data$mean.elec.ts <- mean.elec.ts
+data$median.elec.ts <- median.elec.ts
+data$mode.elec.ts <- mode.elec.ts
+```
+
+You can also take grouped means. In this example, I grouped by month, meaning any missing value that was observed during January will be replaced with the mean of the other existing values that were observed in January, etc. The `imputeTS` package does not offer this functionality, so this is done using the `na.aggregate()` function from the `zoo` package.
+```{r}
+monthly.mean.elec.ts <- zoo::na.aggregate(elec.ts, by=month(data$Timestamp))
+```
+
+```{r, echo=FALSE}
+data$monthly.mean.elec.ts <- monthly.mean.elec.ts
+```
+
+
+### Last Observation Carried Forward (LOCF)
+This method replaces each NA with the most recent non-NA value prior. This method uses the `na_locf()` function from the `imputeTS` package. If your time series begins with missing data, then this method will fail to fill in the first missing data, and the output will still have missing data.
+```{r}
+locf.elec.ts <- na_locf(elec.ts, option = "locf")
+```
+
+Let's see what LOCF actually looks like for the time period from 7/17 (index=15968) to 7/19 (index=16220) where electricity data was originally missing:
+```{r}
+# tabular representation
+data$locf.elec.ts <- locf.elec.ts #add interpolated time series to data frame
+data %>% select(Timestamp, electricity, locf.elec.ts) %>% slice(15966:15970,16218:16222) %>% kable() %>% kable_styling()
+
+# graphical representation
+ggplot_na_imputations(elec.ts[15900:16400], locf.elec.ts[15900:16400])
+```
+
+
+### Next Observation Carried Backward (NOCB)
+This method is very similar to LOCF, but you take the next non-NA value and fill in the missing data backwards instead. This method is implemented using the `option='nocb'` option from the same `na_locf()` function from the `imputeTS` package.
+```{r}
+nocb.elec.ts <- na_locf(elec.ts, option = "nocb")
+```
+
+```{r}
+# tabular representation
+data$nocb.elec.ts <- nocb.elec.ts #add interpolated time series to data frame
+data %>% select(Timestamp, electricity, locf.elec.ts, nocb.elec.ts) %>% slice(15966:15970,16218:16222) %>% kable() %>% kable_styling()
+
+# graphical representation
+ggplot_na_imputations(elec.ts[15900:16400], nocb.elec.ts[15900:16400])
+```
+
+### Moving Average imputation
+This method replaces missing values by a weighted moving average. The `k` parameter determines the width of the window size. In the case of long NA gaps, the window size increases incrementally until at least $k$ observations on each side of the missing value is non-NA. If you decide to replace missing values by a moving average imputation algorithm, the `k` parameter can act as a tuning parameter.
+
+The `weighting` parameter determines the weight of each observation in the window for calculating the mean:
+
+**Simple Moving Average**: all observations in the window are equally weighted.
+
+**Linear Weighted Moving Average**: the weights decrease in arithmetical progression. The observations directly next to the central value have a weight of $\frac{1}{2}$, the observations after that have a weight of $\frac{1}{3}$, and so forth.
+
+**Exponential Weighted Moving Average**: the weights decrease exponentially. The observations directly next to the central value have a weight of $\frac{1}{2}$, the observations after that have a weight of $\frac{1}{4}$ ($\frac{1}{2^2}$), and so forth.
+
+```{r}
+s.ma.elec.ts <- na_ma(elec.ts, k=3, weighting='simple')
+l.ma.elec.ts <- na_ma(elec.ts, k=3, weighting='linear')
+e.ma.elec.ts <- na_ma(elec.ts, k=3, weighting='exponential')
+```
+
+```{r}
+# tabular representation
+data$s.ma.elec.ts <- s.ma.elec.ts #add interpolated time series to data frame
+data$l.ma.elec.ts <- l.ma.elec.ts #add interpolated time series to data frame
+data$e.ma.elec.ts <- e.ma.elec.ts #add interpolated time series to data frame
+
+data %>% select(Timestamp, electricity, s.ma.elec.ts, l.ma.elec.ts, e.ma.elec.ts) %>% slice(15966:15970,16218:16222) %>% kable() %>% kable_styling()
+
+# graphical representation
+ggplot_na_imputations(elec.ts[15900:16400], s.ma.elec.ts[15900:16400], title="Simple Moving Average")
+ggplot_na_imputations(elec.ts[15900:16400], l.ma.elec.ts[15900:16400], title = "Linear Weighted Moving Average")
+ggplot_na_imputations(elec.ts[15900:16400], e.ma.elec.ts[15900:16400], title = "Exponential Weighted Moving Average")
+```
+
+
+### Linear/ Spline/ Stineman Interpolation
+You can choose which type of interpolation you want to perform with the `option` parameter:
+
+**Linear**: fits a straight line between two non-NA points.
+
+**Spline**: performs spline interpolation
+
+**Stineman**: performs interpolation using the Stineman algorithm
+
+```{r}
+linear.elec.ts <- na_interpolation(elec.ts, option = "linear")
+spline.elec.ts <- na_interpolation(elec.ts, option = "spline")
+stine.elec.ts <- na_interpolation(elec.ts, option = "stine")
+```
+
+```{r}
+# tabular representation
+data$linear.elec.ts <- linear.elec.ts #add interpolated time series to data frame
+data$spline.elec.ts <- spline.elec.ts #add interpolated time series to data frame
+data$stine.elec.ts <- stine.elec.ts #add interpolated time series to data frame
+
+data %>% select(Timestamp, electricity, locf.elec.ts, nocb.elec.ts, linear.elec.ts, spline.elec.ts, stine.elec.ts) %>% slice(15966:15970,16218:16222) %>% kable() %>% kable_styling()
+
+# graphical representation
+ggplot_na_imputations(elec.ts[15900:16400], linear.elec.ts[15900:16400], title="Linear Interpolation")
+ggplot_na_imputations(elec.ts[15900:16400], spline.elec.ts[15900:16400], title="Spline Interpolation")
+ggplot_na_imputations(elec.ts[15900:16400], stine.elec.ts[15900:16400], title="Stineman Interpolation")
+```
+
+Based on the graph, we can clearly see that spline interpolation does not fit our data. Comparing linear interpolation and Stineman interpolation, there appears to only be a slight difference. 
+
+
+### Kalman Smoothing imputation
+This method applies Kalman Smoothing on either structural time series models or on the state space representation of an arima model by setting the `model` parameter to `"StructTS"` for a structural model and `"auto.arima"` for an arima model. Set the option `smooth=TRUE` for imputation.
+```{r}
+s.kalman.elec.ts <- na_kalman(elec.ts, model='StructTS', smooth=TRUE)
+a.kalman.elec.ts <- na_kalman(elec.ts, model='auto.arima', smooth=TRUE)
+```
+
+```{r}
+# tabular representation
+data$s.kalman.elec.ts <- s.kalman.elec.ts #add interpolated time series to data frame
+data$a.kalman.elec.ts <- a.kalman.elec.ts #add interpolated time series to data frame
+
+data %>% select(Timestamp, electricity, locf.elec.ts, nocb.elec.ts, linear.elec.ts, stine.elec.ts, s.kalman.elec.ts, a.kalman.elec.ts) %>% slice(15966:15970,16218:16222) %>% kable() %>% kable_styling()
+
+# graphical representation
+ggplot_na_imputations(elec.ts[15900:16400], s.kalman.elec.ts[15900:16400], title="Structural Time Series Model + Kalman Smoothing")
+ggplot_na_imputations(elec.ts[15900:16400], a.kalman.elec.ts[15900:16400], title="State Space Representation of ARIMA Model + Kalman Smoothing")
+```
+
+
+### Seasonally Decomposed Missing Value imputation
+This method removes the seasonal component of the time series data, performs imputation on the deseasonalized series, and then adds the seasonality back again to the time series data.
+
+You can perform any of the imputation methods above on the deseasonalized data with the `algorithm` parameter:
+
+* `algorithm="interpolation"` performs linear interpolation
+
+* `algorithm="locf"` performs LOCF imputation
+    
+* `algorithm="mean"` performs mean imputation
+    
+* `algorithm="kalman"` performs Kalman Smoothing imputation
+
+* `algorithm="ma"` performs exponential weighted moving average imputation
+
+```{r}
+inter.seadec.elec.ts <- na_seadec(elec.ts, algorithm="interpolation", find_frequency=TRUE)
+ma.seadec.elec.ts <- na_seadec(elec.ts, algorithm="ma", find_frequency=TRUE)
+```
+
+```{r}
+# tabular representation
+data$inter.seadec.elec.ts <- inter.seadec.elec.ts #add interpolated time series to data frame
+data$ma.seadec.elec.ts <- ma.seadec.elec.ts #add interpolated time series to data frame
+
+data %>% select(Timestamp, electricity, locf.elec.ts, nocb.elec.ts, linear.elec.ts, stine.elec.ts, inter.seadec.elec.ts, ma.seadec.elec.ts) %>% slice(15966:15970,16218:16222) %>% kable() %>% kable_styling()
+
+# graphical representation
+ggplot_na_imputations(elec.ts[15900:16400], inter.seadec.elec.ts[15900:16400], title="Seasonally decomposed linear interpolation")
+ggplot_na_imputations(elec.ts[15900:16400], ma.seadec.elec.ts[15900:16400], title="Seasonally decomposed exponential weighted moving average imputation")
+```
+
+
+# Conclusion
+Imputation is always very dependent on the characteristics of the time series data you are working with. It will depend on the trend, seasonality, and autocorrelation of your data.
+
+The data we used to demonstrate different imputation algorithms was electricity usage in kW for Minor Hall at the University of Virginia. This univariate time series data had 552 rows of missing data. A plot of our time series data revealed that there wasn't a trend, but there was strong seasonality.
+
+Mean, median, mode, LOCF, and NOCB imputation are all simple and fast algorithms, but present a clear problem of not capturing trend or seasonality. Thus, these algorithms are computationally advantageous, but not robust. These methods are particularly problematic when there are large gaps in the time series, as can be seen in our data from 7/17-7/19. These methods simply fit a horizontal line and did not capture any of the seasonality in our data. In some cases however, they may be enough, especially for time series with no trend or seasonality.
+
+Moving average imputation takes mean imputation one step further by restricting the mean to observations around the missing data. This algorithm is a better choice than regular mean imputation if your time series happens to have a strong trend.
+
+For time series with strong seasonality, the Kalman Smoothing and Seasonally Decomposed imputation algorithms work best since they directly consider the seasonality of the data. 
+
+Overall, the seasonally decomposed imputation was the algorithm that best fit our electricity time series data because it was the only one that captured seasonality.
+
+
+### References
+1. [Comparison of different Methods for
+Univariate Time Series Imputation in R](https://arxiv.org/ftp/arxiv/papers/1510/1510.03924.pdf)
+2. [imputeTS: Time Series Missing Value
+Imputation in R](https://cran.r-project.org/web/packages/imputeTS/vignettes/imputeTS-Time-Series-Missing-Value-Imputation-in-R.pdf)
+3. [Package 'imputeTS'](https://cran.r-project.org/web/packages/imputeTS/imputeTS.pdf)
+4. Lecture slides on Time Series Analysis from SYS 4021 with Professor Barnes and Professor Quinn
+

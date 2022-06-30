@@ -23,3 +23,24 @@
    if hashing function is efficient enough.
    
    Note: was given skeleton files, so not ALL code is 100% mine
+
+4) SYS 6018, Homework 2 Supervised Learning
+
+   hw2.Rmd, hw2.html
+   
+   Description: basics of supervised learning with polynomial regression, bootstrapping, cross-validation, and k-nearest neighbor modeling.
+
+
+5) SYS 6018, Homework 6 Clustering
+
+   hw6.Rmd, hw6.html
+
+   Description: applying clustering to customer data and basics of poisson mixture model
+
+
+6) SYS 6018, Final Project
+
+   project.Rmd, project.html
+
+   Description: final project with a topic of my personal choosing. Having worked with time series data for my undergraduate senior capstone 
+   project, I was curious to explore the many ways to interpolate for missing data in time series.
